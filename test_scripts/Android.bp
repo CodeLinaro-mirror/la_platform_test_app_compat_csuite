@@ -21,6 +21,9 @@ java_library_host {
     srcs: [
         "src/main/java/**/*.java",
     ],
+    exclude_srcs: [
+        "src/main/java/com/android/pixel/**/*.java",
+    ],
     java_resource_dirs: [
         "src/main/resources",
     ],
