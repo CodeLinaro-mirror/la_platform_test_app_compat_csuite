@@ -44,22 +44,21 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
 /** A test that verifies that a single app can be successfully launched. */
 @RunWith(DeviceJUnit4ClassRunner.class)
 public class WebviewAppLaunchTest extends BaseHostJUnit4Test {
     @Rule public TestLogData mLogData = new TestLogData();
 
+    private static final long COMMAND_TIMEOUT_MILLIS = 5 * 60 * 1000;
+
     private ApkInstaller mApkInstaller;
     private final List<WebviewPackage> mOrderedWebviews = new ArrayList<>();
     private WebviewPackage mPreInstalledWebview;
     private WebviewPackage mCurrentWebview;
-    private List<String> mWebviewInstallerCommandLineArgs = new ArrayList<>();
+    private GcloudCli mGcloudCli;
 
     @Option(name = "record-screen", description = "Whether to record screen during test.")
     private boolean mRecordScreen;
@@ -98,65 +97,53 @@ public class WebviewAppLaunchTest extends BaseHostJUnit4Test {
     private int mAppLaunchTimeoutMs = 20000;
 
     @Option(
-            name = "webview-apk-dir",
-            description = "The path to the webview apk.",
+            name = "gcloud-cli-zip-archive",
+            description = "Path to the google cli zip archive.",
             importance = Importance.ALWAYS)
-    private File mWebviewApkDir;
+    private File mGcloudCliZipArchive;
 
     @Before
     public void setUp() throws DeviceNotAvailableException, ApkInstallerException, IOException {
-        Assert.assertNotNull("Package name cannot be null", mPackageName);
         mCurrentWebview = mPreInstalledWebview = getCurrentWebviewPackage();
-        Assert.assertTrue(
-                "Either --webview-version-to-test or --webview-apk-dir must be used.",
-                mWebviewApkDir != null || !mWebviewVersionToTest.isEmpty());
 
-        if (mWebviewApkDir != null) {
-            Assert.assertTrue(
-                    "Argument --webview-version-to-test cannot be used with --webview-apk-dir",
-                    mWebviewVersionToTest.isEmpty());
-            Assert.assertEquals(
-                    "Argument --webview-channel cannot be used with --webview-apk-dir",
-                    mWebviewChannel,
-                    null);
-            Assert.assertEquals(
-                    "Argument --webview-installer-tool cannot be used with --webview-apk-dir",
-                    mWebviewInstallerTool,
-                    null);
-            readWebviewApkDirectory();
-        }
+        Assert.assertNotNull("Package name cannot be null", mPackageName);
+        Assert.assertFalse(
+                "--webview-version-to-test must be used when running this test",
+                mWebviewVersionToTest.isEmpty());
+        Assert.assertNotEquals(
+                "Argument --webview-installer-tool must be used when "
+                        + "using the --webview-version-to-test argument.",
+                mWebviewInstallerTool,
+                null);
+        Assert.assertNotEquals(
+                "Argument --gcloud-cli-zip must be used when "
+                        + "using the --webview-version-to-test argument.",
+                mGcloudCliZipArchive,
+                null);
 
-        if (!mWebviewVersionToTest.isEmpty()) {
-            Assert.assertEquals(
-                    "Argument --webview-version-to-test cannot be used with --webview-apk-dir",
-                    mWebviewApkDir,
-                    null);
-            Assert.assertNotEquals(
-                    "Argument --webview-installer-tool must be used when "
-                            + "using the --webview-version-to-test argument.",
-                    mWebviewInstallerTool,
-                    null);
-            mWebviewVersionToTest.sort(
-                    (version1, version2) -> {
-                        String[] versionParts1 = version1.split("\\.");
-                        String[] versionParts2 = version2.split("\\.");
-                        for (int i = 0; i < 4; i++) {
-                            int comparison =
-                                    Integer.compare(
-                                            Integer.parseInt(versionParts1[i]),
-                                            Integer.parseInt(versionParts2[i]));
-                            if (comparison != 0) return -comparison;
-                        }
-                        return 0;
-                    });
-            mWebviewInstallerCommandLineArgs.add(mWebviewInstallerTool.getAbsolutePath());
-            if (mWebviewChannel != null) {
-                mWebviewInstallerCommandLineArgs.addAll(Arrays.asList("-c", mWebviewChannel));
-            }
-            // TODO(rmhasan): Remove the --non-next command line argument after
-            // crbug.com/1002673 is resolved.
-            mWebviewInstallerCommandLineArgs.addAll(Arrays.asList("--non-next", "--verbose"));
-        }
+        mGcloudCli = GcloudCli.buildFromZipArchive(mGcloudCliZipArchive);
+        mWebviewVersionToTest.sort(
+                (version1, version2) -> {
+                    String[] versionParts1 = version1.split("\\.");
+                    String[] versionParts2 = version2.split("\\.");
+                    for (int i = 0; i < 4; i++) {
+                        int comparison =
+                                Integer.compare(
+                                        Integer.parseInt(versionParts1[i]),
+                                        Integer.parseInt(versionParts2[i]));
+                        if (comparison != 0) return -comparison;
+                    }
+                    return 0;
+                });
+        RunUtil.getDefault()
+                .runTimedCmd(
+                        COMMAND_TIMEOUT_MILLIS,
+                        System.out,
+                        System.out,
+                        "chmod",
+                        "755",
+                        "-v",
+                        mWebviewInstallerTool.getAbsolutePath());
 
         mApkInstaller = ApkInstaller.getInstance(getDevice());
 
@@ -165,7 +152,6 @@ public class WebviewAppLaunchTest extends BaseHostJUnit4Test {
             mApkInstaller.install(apkPath.toPath(), mInstallArgs);
         }
 
-        Runtime.getRuntime().exec(new String[] {"chmod", "u+x", mWebviewInstallerTool.getPath()});
         DeviceUtils.getInstance(getDevice()).freezeRotation();
 
         printWebviewVersion(mPreInstalledWebview);
@@ -178,11 +164,8 @@ public class WebviewAppLaunchTest extends BaseHostJUnit4Test {
         AssertionError lastError = null;
         // Try the latest webview version
         WebviewPackage lastWebviewInstalled;
-        Iterator<?> webviewsToTestIterator =
-                (!mWebviewVersionToTest.isEmpty() ? mWebviewVersionToTest : mOrderedWebviews)
-                        .iterator();
+        Iterator<String> webviewsToTestIterator = mWebviewVersionToTest.iterator();
 
-        Assert.assertTrue("There are no Webview's to test", webviewsToTestIterator.hasNext());
         lastWebviewInstalled = installWebview(webviewsToTestIterator.next());
 
         try {
@@ -241,15 +224,8 @@ public class WebviewAppLaunchTest extends BaseHostJUnit4Test {
 
         mApkInstaller.uninstallAllInstalledPackages();
         printWebviewVersion();
-        mOrderedWebviews.clear();
-    }
 
-    private void readWebviewApkDirectory() {
-        mOrderedWebviews.addAll(
-                Arrays.asList(mWebviewApkDir.listFiles()).stream()
-                        .map(apk -> WebviewPackage.buildFromApk(apk.toPath()))
-                        .sorted(Comparator.reverseOrder())
-                        .collect(Collectors.toList()));
+        mGcloudCli.tearDown();
     }
 
     private void printWebviewVersion(WebviewPackage currentWebview)
@@ -263,40 +239,42 @@ public class WebviewAppLaunchTest extends BaseHostJUnit4Test {
         printWebviewVersion(currentWebview);
     }
 
-    private WebviewPackage installWebview(Object webviewToInstall)
-            throws ApkInstallerException, InterruptedException, IOException,
-                    DeviceNotAvailableException {
-        if (webviewToInstall instanceof String) return installWebview((String) webviewToInstall);
-        else return installWebview((WebviewPackage) webviewToInstall);
-    }
-
     private WebviewPackage installWebview(String webviewVersion)
             throws IOException, InterruptedException, DeviceNotAvailableException {
-        ProcessBuilder installWebviewProcessBuilder;
-        Process installWebviewProcess;
-        List<String> fullCommandLineArgs = new ArrayList<>(mWebviewInstallerCommandLineArgs);
+        // TODO(rmhasan): Remove the --non-next command line argument after
+        // crbug.com/1002673 is resolved.
+        List<String> fullCommandLineArgs =
+                new ArrayList<>(
+                        Arrays.asList(
+                                mWebviewInstallerTool.getAbsolutePath(),
+                                "--chrome-version",
+                                webviewVersion,
+                                "--non-next",
+                                "--serial",
+                                getDevice().getSerialNumber(),
+                                "-vvv",
+                                "--gsutil",
+                                mGcloudCli.getGsutilExecutable().getAbsolutePath()));
 
-        fullCommandLineArgs.addAll(Arrays.asList("--chrome-version", webviewVersion));
-        installWebviewProcessBuilder = new ProcessBuilder(fullCommandLineArgs);
-        installWebviewProcess = installWebviewProcessBuilder.inheritIO().start();
-        installWebviewProcess.waitFor(5, TimeUnit.MINUTES);
+        if (mWebviewChannel != null) {
+            fullCommandLineArgs.addAll(Arrays.asList("-c", mWebviewChannel));
+        }
 
-        int exitCode = installWebviewProcess.exitValue();
+        CommandResult installWebViewRes =
+                mGcloudCli
+                        .getRunUtil()
+                        .runTimedCmd(
+                                COMMAND_TIMEOUT_MILLIS,
+                                System.out,
+                                System.out,
+                                fullCommandLineArgs.toArray(new String[0]));
         Assert.assertEquals(
-                String.format("The install WebView process exited with the %d exit code", exitCode),
-                exitCode,
-                0);
+                "The WebView installer tool failed to install WebView:\n"
+                        + installWebViewRes.toString(),
+                installWebViewRes.getStatus(),
+                CommandStatus.SUCCESS);
 
         mCurrentWebview = getCurrentWebviewPackage();
-        printWebviewVersion(mCurrentWebview);
-        return mCurrentWebview;
-    }
-
-    private WebviewPackage installWebview(WebviewPackage webviewPkg)
-            throws ApkInstallerException, IOException, DeviceNotAvailableException {
-        ApkInstaller.getInstance(getDevice()).install(webviewPkg.getPath());
-        updateWebviewImplementation(webviewPkg.getPackageName());
-        mCurrentWebview = webviewPkg;
         printWebviewVersion(mCurrentWebview);
         return mCurrentWebview;
     }
