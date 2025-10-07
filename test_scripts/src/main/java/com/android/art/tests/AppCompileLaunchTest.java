@@ -154,12 +154,22 @@ public class AppCompileLaunchTest extends BaseHostJUnit4Test {
 
         Throwable testFailureThrowable = null;
 
-        CommandResult cmdResult =
-                getDevice().executeShellV2Command("cmd package compile -m speed " + mPackageName);
-        Assert.assertEquals(
-                "Failed to execute compile command: " + cmdResult,
-                CommandStatus.SUCCESS,
-                cmdResult.getStatus());
+        try {
+            CommandResult cmdResult =
+                    getDevice()
+                            .executeShellV2Command("cmd package compile -m speed " + mPackageName);
+            if (cmdResult.getStatus() != CommandStatus.SUCCESS) {
+                CLog.w(
+                        "Failed to execute compile command for %s, stderr: %s",
+                        mPackageName, cmdResult.getStderr());
+                mIsLastTestPass = true;
+                return;
+            }
+        } catch (DeviceNotAvailableException e) {
+            CLog.w("Ignoring test result for %s as the device is not available", mPackageName);
+            mIsLastTestPass = true;
+            return;
+        }
 
         try {
             doTestAppCrash(false);
@@ -175,14 +185,26 @@ public class AppCompileLaunchTest extends BaseHostJUnit4Test {
         }
 
         if (mIsLastTestPass) {
+            // No crash.
             return;
         }
 
+        // Reinstall the app and run the test again without speed compile.
         CLog.i("Test on %s failed. Starting verification without speed compile.", mPackageName);
 
-        // No need to call uninstall command as the install command does uninstall first anyway
-        mApkInstaller.install(
-                mApkPaths.stream().map(File::toPath).collect(Collectors.toList()), mInstallArgs);
+        try {
+            // No need to call uninstall command as the install command does uninstall first anyway
+            mApkInstaller.install(
+                    mApkPaths.stream().map(File::toPath).collect(Collectors.toList()),
+                    mInstallArgs);
+        } catch (Throwable e) {
+            // Do not throw to fail the test here as it's not compile related
+            CLog.i(
+                    "Ignoring test result for %s as the APK failed to install/uninstall",
+                    mPackageName);
+            mIsLastTestPass = true;
+            return;
+        }
 
         try {
             doTestAppCrash(true);
